@@ -158,21 +158,37 @@ class MoiraiModule(
         :param patch_size: patch size for each token
         :return: predictive distribution
         """
+        print('target', target.shape)
+        print('observed_mask', observed_mask.shape, observed_mask)
+        print('sample_id', sample_id.shape, sample_id)
+        print('time_id', time_id.shape, time_id)
+        print('variate_id', variate_id.shape, variate_id)
+        print('prediction_mask', prediction_mask.shape, prediction_mask)
+        print('patch_size', patch_size.shape, patch_size)
+
         loc, scale = self.scaler(
             target,
             observed_mask * ~prediction_mask.unsqueeze(-1),
             sample_id,
             variate_id,
         )
+        print('loc', loc.shape, loc)
+        print('scale', scale.shape, scale)
         scaled_target = (target - loc) / scale
+        print('scaled_target', scaled_target.shape)
         reprs = self.in_proj(scaled_target, patch_size)
+        print('reprs', reprs.shape)
         masked_reprs = mask_fill(reprs, prediction_mask, self.mask_encoding.weight)
+        print('masked_reprs', masked_reprs.shape)
         reprs = self.encoder(
             masked_reprs,
             packed_attention_mask(sample_id),
             time_id=time_id,
             var_id=variate_id,
         )
+        print('after_encoder', 'reprs', reprs.shape)
         distr_param = self.param_proj(reprs, patch_size)
+        print('distr_param', distr_param['weights_logits'].shape, distr_param['components'])
         distr = self.distr_output.distribution(distr_param, loc=loc, scale=scale)
+        print('distr', distr)
         return distr
