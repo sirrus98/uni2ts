@@ -24,6 +24,7 @@ class EncoderModel(nn.Module):
 
     def forward(self, x):
         past_target = torch.as_tensor(x).T.unsqueeze(0).to(dtype=torch.float32).to(self.device)
+        print(past_target.shape)
         past_observed_target = torch.ones_like(past_target, dtype=torch.bool).to(self.device)
         # 1s if the value is padding, 0s otherwise. Shape: (batch, time)
         past_is_pad = torch.zeros_like(past_target, dtype=torch.bool).squeeze(-1)[:, :, 0].to(self.device)
