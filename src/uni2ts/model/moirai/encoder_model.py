@@ -50,36 +50,36 @@ class EncoderModel(nn.Module):
 
         return encoded
 
-    def forward(self, x):
-        target, observed_mask, sample_id, time_id, variate_id, prediction_mask, patch_size = x
-
-        print('target', target.shape)
-        print('observed_mask', observed_mask.shape)
-        print('sample_id', sample_id.shape)
-        print('time_id', time_id.shape)
-        print('variate_id', variate_id.shape)
-        print('prediction_mask', prediction_mask.shape)
-
-        loc, scale = self.model.scaler(target, observed_mask * ~prediction_mask.unsqueeze(-1),
-                                        sample_id,
-                                        variate_id, )
-
-        print('loc', loc.shape)
-        print('scale', scale.shape)
-
-        scaled_target = (target - loc) / scale
-        # print(patch_size.shape)
-
-        reprs = self.model.in_proj(scaled_target, patch_size)
-        masked_reprs = mask_fill(reprs, prediction_mask,self.model.mask_encoding.weight)
-        encoded = self.model.encoder(
-            masked_reprs,
-            packed_attention_mask(sample_id),
-            time_id=time_id,
-            var_id=variate_id,
-        )
-
-        return encoded
+    # def forward(self, x):
+    #     target, observed_mask, sample_id, time_id, variate_id, prediction_mask, patch_size = x
+    #
+    #     print('target', target.shape)
+    #     print('observed_mask', observed_mask.shape)
+    #     print('sample_id', sample_id.shape)
+    #     print('time_id', time_id.shape)
+    #     print('variate_id', variate_id.shape)
+    #     print('prediction_mask', prediction_mask.shape)
+    #
+    #     loc, scale = self.model.scaler(target, observed_mask * ~prediction_mask.unsqueeze(-1),
+    #                                     sample_id,
+    #                                     variate_id, )
+    #
+    #     print('loc', loc.shape)
+    #     print('scale', scale.shape)
+    #
+    #     scaled_target = (target - loc) / scale
+    #     print(patch_size.shape)
+    #
+    #     reprs = self.model.in_proj(scaled_target, patch_size)
+    #     masked_reprs = mask_fill(reprs, prediction_mask,self.model.mask_encoding.weight)
+    #     encoded = self.model.encoder(
+    #         masked_reprs,
+    #         packed_attention_mask(sample_id),
+    #         time_id=time_id,
+    #         var_id=variate_id,
+    #     )
+    #
+    #     return encoded
 
 class LightningWrapper(L.LightningModule):
     def __init__(self, encoder):
