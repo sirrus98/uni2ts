@@ -164,3 +164,4 @@ cython_debug/
 
 example/data_cache/
 rns_data/
+example/lightning_logs/

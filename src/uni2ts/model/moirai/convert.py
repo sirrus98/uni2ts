@@ -188,42 +188,43 @@ def _convert(
         ]
     )
     if future_is_pad is None:
+        # future_is_pad = torch.zeros(
+        #     batch_shape + (self.hparams.prediction_length,),
+        #     dtype=torch.long,
+        #     device=device,
+        # )
+
         future_is_pad = torch.zeros(
-            batch_shape + (prediction_length,),
+            batch_shape + (prediction_length, past_target.shape[-1]),
             dtype=torch.long,
             device=device,
         )
     sample_id.extend(
-        [
-            repeat(
-                reduce(
-                    (
-                            _patched_seq_pad(
-                                patch_size, past_is_pad, -1, left=True, value=1
-                            )
-                            == 0
-                    ).int(),
-                    "... (seq patch) -> ... seq",
-                    "max",
-                    patch=patch_size,
-                ),
-                "... seq -> ... (dim seq)",
-                dim=past_target.shape[-1],
+        [rearrange(reduce(
+            (
+                    _patched_seq_pad(
+                        patch_size, past_is_pad, -2, left=True, value=1
+                    )
+                    == 0
+            ).int(),
+            "... (seq patch) c -> ... seq c",
+            "max",
+            patch=patch_size,
+        ),
+            '... seq c -> ... (c seq)'
+        ),
+            rearrange(reduce(
+                (
+                        _patched_seq_pad(
+                            patch_size, future_is_pad, -2, left=False, value=1
+                        )
+                        == 0
+                ).int(),
+                "... (seq patch) c -> ... seq c",
+                "max",
+                patch=patch_size,
             ),
-            repeat(
-                reduce(
-                    (
-                            _patched_seq_pad(
-                                patch_size, future_is_pad, -1, left=False, value=1
-                            )
-                            == 0
-                    ).int(),
-                    "... (seq patch) -> ... seq",
-                    "max",
-                    patch=patch_size,
-                ),
-                "... seq -> ... (dim seq)",
-                dim=past_target.shape[-1],
+                '... seq c -> ... (c seq)'
             ),
         ]
     )
