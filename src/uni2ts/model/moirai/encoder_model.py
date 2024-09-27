@@ -118,12 +118,20 @@ class LightningWrapper(L.LightningModule):
 
         return unmasked_z, unmasked_label
 
+    def prepare_unmasked_data_channel_label(self, z, data_zip, label):
+        sample_id = data_zip[2]
+        mask = sample_id.to(dtype=torch.bool)
+        unmasked_z = z[mask]
+        unmasked_label = label[mask]
+
+        return unmasked_z, unmasked_label
+
     def training_step(self, batch, batch_idx):
         data_zip, label = batch
         self.encoder.eval()
         with torch.no_grad():
             z = self.encoder(data_zip)
-        unmasked_z, unmasked_label = self.prepare_unmasked_data_label(z, data_zip, label)
+        unmasked_z, unmasked_label = self.prepare_unmasked_data_channel_label(z, data_zip, label)
         logits = self.fc2(self.relu(self.fc1(unmasked_z)))
         loss = self.criterion(logits, unmasked_label.long())
 
@@ -136,12 +144,12 @@ class LightningWrapper(L.LightningModule):
         self.encoder.eval()
         with torch.no_grad():
             z = self.encoder(data_zip)
-        unmasked_z, unmasked_label = self.prepare_unmasked_data_label(z, data_zip, label)
+        unmasked_z, unmasked_label = self.prepare_unmasked_data_channel_label(z, data_zip, label)
         logits = self.fc2(self.relu(self.fc1(unmasked_z)))
 
         return data_zip, unmasked_z, unmasked_label, logits
 
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.parameters(), lr=1e-5)
+        optimizer = torch.optim.Adam(self.parameters(), lr=1e-4)
 
         return optimizer
