@@ -35,14 +35,7 @@ class EncoderModel(nn.Module):
                                        sample_id,
                                        variate_id, )
 
-        # print('loc', loc.shape)
-        # print('scale', scale.shape)
-        dmin = -512
-        dmax = 511
-
         scaled_target = (target - loc) / scale
-        # scaled_target = (target - dmin) / (dmax - dmin)
-        # print(patch_size.shape)
 
         reprs = self.model.in_proj(scaled_target, patch_size)
         masked_reprs = mask_fill(reprs, prediction_mask, self.model.mask_encoding.weight)
@@ -53,7 +46,7 @@ class EncoderModel(nn.Module):
             var_id=variate_id,
         )
 
-        return encoded
+        return encoded, scaled_target
 
     # def forward(self, x):
     #     target, observed_mask, sample_id, time_id, variate_id, prediction_mask, patch_size = x
@@ -87,7 +80,144 @@ class EncoderModel(nn.Module):
     #     return encoded
 
 
-class LightningWrapper(L.LightningModule):
+class Pretraining(L.LightningModule):
+    def __init__(self, encoder):
+        super().__init__()
+        self.encoder = encoder
+        self.fc1 = nn.Linear(384, 256)
+        self.fc2 = nn.Linear(256, 128)
+        self.relu = nn.ReLU()
+        self.criterion = nn.MSELoss(reduction='mean')
+
+    def process_unmasked_data(self, data, mask, time_id):
+        unmasked_data = []
+
+        for batch_n in range(data.shape[0]):
+            dt_masked = data[batch_n][mask[batch_n]]
+            t_id_last = time_id[batch_n][mask[batch_n]][-1] + 1
+            reformatted = rearrange(dt_masked, '(s t) f -> s t f', t=t_id_last)
+            pooled = reformatted.mean(dim=0)
+
+            unmasked_data.append(pooled)
+
+        return torch.concat(unmasked_data, dim=0)
+
+    def generate_symmetrical_mask(self, sample_id, prediction_mask):
+        # Find indices where sample_id_tensor equals 1
+        valid_indices = torch.nonzero(sample_id == 1)
+        total_valid_indices = len(valid_indices)
+
+        # Randomly select half of the valid indices
+        half_size = total_valid_indices // 2
+        selected_random_indices = torch.randperm(total_valid_indices)[:half_size]
+
+        # Create boolean masks for splitting the valid indices
+        mask1_selector = torch.zeros(total_valid_indices, dtype=torch.bool)
+        mask1_selector[selected_random_indices] = True
+        mask2_selector = ~mask1_selector
+
+        # Initialize output masks with the same shape as full_mask
+        mask1 = torch.zeros_like(prediction_mask, dtype=torch.bool)
+        mask2 = torch.zeros_like(prediction_mask, dtype=torch.bool)
+
+        # Apply the selected and complementary indices to their respective masks
+        mask1[valid_indices[mask1_selector][:, 0], valid_indices[mask1_selector][:, 1]] = True
+        mask2[valid_indices[mask2_selector][:, 0], valid_indices[mask2_selector][:, 1]] = True
+
+        return mask1, mask2
+
+    def prepare_unmasked_data_label(self, z, data_zip, label):
+        sample_id = data_zip[2]
+        time_id = data_zip[3]
+        mask = sample_id.to(dtype=torch.bool)
+        unmasked_z = self.process_unmasked_data(z, mask, time_id)
+        unmasked_label = label[mask[:, :label.shape[1]]]
+
+        return unmasked_z, unmasked_label
+
+    def prepare_unmasked_data_channel_label(self, z, data_zip, label):
+        sample_id = data_zip[2]
+        mask = sample_id.to(dtype=torch.bool)
+        unmasked_z = z[mask]
+        unmasked_label = label[mask]
+
+        return unmasked_z, unmasked_label
+
+    def std_norm(self, x, batch_n):
+        # print(range(batch_n.max()+1))
+        # print(batch_n)
+        for i in range(batch_n.max()+1):
+            # print(i)
+            idx = batch_n == i
+            mean = torch.mean(x[idx] )
+            std = torch.std(x[idx])
+            x[idx] = (x[idx] - mean) / (std+1e-6)
+        return x
+    def training_step(self, batch, batch_idx):
+        data_zip, label, batch_n = batch
+        mask_1, mask_2 = self.generate_symmetrical_mask(data_zip[2], data_zip[5])
+        data_zip[5] = mask_1
+        z_1, scaled_target = self.encoder(data_zip)
+        z_1 = z_1[mask_1]
+        _x_1 = self.fc2(self.relu(self.fc1(z_1)))
+        batch_n_1 = batch_n[mask_1]
+        data_zip[5] = mask_2
+        z_2, scaled_target = self.encoder(data_zip)
+        z_2 = z_2[mask_2]
+        _x_2 = self.fc2(self.relu(self.fc1(z_2)))
+        batch_n_2 = batch_n[mask_2]
+        # print(batch_n_1.shape, batch_n_2.shape)
+
+        pred_concat = torch.cat((_x_1, _x_2), dim=0)
+        # print(pred_concat.shape)
+        target_concat = torch.cat((scaled_target[mask_1], scaled_target[mask_2]), dim=0)
+        # print(target_concat.shape)
+        batch_n = torch.cat((batch_n_1, batch_n_2), dim=0)
+        # print(batch_n.shape)
+
+        target_fft = torch.fft.fft(target_concat, dim=-1)
+        target_amplitude = torch.abs(target_fft)
+        target_amplitude = self.std_norm(target_amplitude, batch_n)
+        target_phase = torch.angle(target_fft)
+        target_phase = self.std_norm(target_phase, batch_n)
+
+        reconstructed_fft = torch.fft.fft(pred_concat, dim = -1)
+        reconstructed_amplitude = torch.abs(reconstructed_fft)
+        reconstructed_amplitude = self.std_norm(reconstructed_amplitude, batch_n)
+        reconstructed_phase = torch.angle(reconstructed_fft)
+        reconstructed_phase = self.std_norm(reconstructed_phase, batch_n)
+
+        reconstruction_loss = torch.nn.functional.mse_loss(scaled_target[mask_1], _x_1)
+        amplitude_loss = torch.nn.functional.mse_loss(target_amplitude, reconstructed_amplitude)
+        phase_loss = torch.nn.functional.mse_loss(target_phase, reconstructed_phase)
+
+
+        loss = amplitude_loss + phase_loss + reconstruction_loss
+        self.log('amp_loss', amplitude_loss, prog_bar=True)
+        self.log('phase_loss', phase_loss, prog_bar=True)
+        self.log('recon_loss', reconstruction_loss, prog_bar=True)
+
+        self.log('loss', loss, prog_bar=True)
+
+        return loss
+
+    def predict_step(self, batch, batch_idx):
+        data_zip, label = batch
+        self.encoder.eval()
+        with torch.no_grad():
+            z = self.encoder(data_zip)
+        unmasked_z, unmasked_label = self.prepare_unmasked_data_channel_label(z, data_zip, label)
+        logits = self.fc2(self.relu(self.fc1(unmasked_z)))
+
+        return data_zip, unmasked_z, unmasked_label, logits
+
+    def configure_optimizers(self):
+        optimizer = torch.optim.Adam(self.parameters(), lr=1e-6)
+
+        return optimizer
+
+
+class LinearProbing(L.LightningModule):
     def __init__(self, encoder):
         super().__init__()
         self.encoder = encoder
