@@ -106,19 +106,24 @@ class Pretraining(L.LightningModule):
 
         return torch.concat(unmasked_data, dim=0)
 
-    def generate_symmetrical_mask(self, sample_id, prediction_mask):
+    def generate_symmetrical_mask(self, sample_id, prediction_mask, ratio = 0.3):
         # Find indices where sample_id_tensor equals 1
         valid_indices = torch.nonzero(sample_id == 1)
         total_valid_indices = len(valid_indices)
 
         # Randomly select half of the valid indices
-        half_size = total_valid_indices // 2
-        selected_random_indices = torch.randperm(total_valid_indices)[:half_size]
+        mask_size = int(total_valid_indices * ratio)
+
+        # Randomly select 'mask1_size' number of indices
+        selected_random_indices_1 = torch.randperm(total_valid_indices)[:mask_size]
+        selected_random_indices_2 = torch.randperm(total_valid_indices)[mask_size:]
 
         # Create boolean masks for splitting the valid indices
         mask1_selector = torch.zeros(total_valid_indices, dtype=torch.bool)
-        mask1_selector[selected_random_indices] = True
-        mask2_selector = ~mask1_selector
+        mask2_selector = torch.zeros(total_valid_indices, dtype=torch.bool)
+        mask1_selector[selected_random_indices_1] = True
+        mask2_selector[selected_random_indices_2] = True
+        # mask2_selector = ~mask1_selector
 
         # Initialize output masks with the same shape as full_mask
         mask1 = torch.zeros_like(prediction_mask, dtype=torch.bool)
@@ -162,25 +167,37 @@ class Pretraining(L.LightningModule):
         data_zip, label, batch_n = batch
         mask_1, mask_2 = self.generate_symmetrical_mask(data_zip[2], data_zip[5])
         data_zip[5] = mask_1
+
+        sample_id = data_zip[2]
+        mask = sample_id.to(dtype=torch.bool)
         z_1, scaled_target = self.encoder(data_zip)
-        z_1 = z_1[mask_1]
+        z_1 = z_1[mask]
         _x_1_amp = self.fc2_1(self.relu(self.fc1_1(z_1)))
         _x_1_pha = self.fc2_2(self.relu(self.fc1_2(z_1)))
-        batch_n_1 = batch_n[mask_1]
-        data_zip[5] = mask_2
-        z_2, scaled_target = self.encoder(data_zip)
-        z_2 = z_2[mask_2]
-        _x_2_amp = self.fc2_1(self.relu(self.fc1_1(z_2)))
-        _x_2_pha = self.fc2_2(self.relu(self.fc1_2(z_2)))
-        batch_n_2 = batch_n[mask_2]
+        batch_n_1 = batch_n[mask]
+        # data_zip[5] = mask_2
+        # z_2, scaled_target = self.encoder(data_zip)
+        # z_2 = z_2[mask_2]
+        # _x_2_amp = self.fc2_1(self.relu(self.fc1_1(z_2)))
+        # _x_2_pha = self.fc2_2(self.relu(self.fc1_2(z_2)))
+        # batch_n_2 = batch_n[mask_2]
         # print(batch_n_1.shape, batch_n_2.shape)
 
-        pred_concat_amp = torch.cat((_x_1_amp, _x_2_amp), dim=0)
-        pred_concat_pha = torch.cat((_x_1_pha, _x_2_pha), dim=0)
+        # pred_concat_amp = torch.cat((_x_1_amp, _x_2_amp), dim=0)
+        # pred_concat_pha = torch.cat((_x_1_pha, _x_2_pha), dim=0)
+
+        pred_concat_amp = _x_1_amp
+        pred_concat_pha = _x_1_pha
+
+        # pred_concat_amp = torch.cat((_x_1_amp, _x_2_amp), dim=0)
+        # pred_concat_pha = torch.cat((_x_1_pha, _x_2_pha), dim=0)
         # print(pred_concat.shape)
-        target_concat = torch.cat((scaled_target[mask_1], scaled_target[mask_2]), dim=0)
+
+        target_concat = scaled_target[mask]
+        # target_concat = torch.cat((scaled_target[mask_1], scaled_target[mask_2]), dim=0)
         # print(target_concat.shape)
-        batch_n = torch.cat((batch_n_1, batch_n_2), dim=0)
+        batch_n = batch_n_1
+        # batch_n = torch.cat((batch_n_1, batch_n_2), dim=0)
         # print(batch_n.shape)
 
         target_fft = torch.fft.fft(target_concat, dim=-1)
@@ -195,7 +212,7 @@ class Pretraining(L.LightningModule):
         # reconstructed_phase = torch.angle(reconstructed_fft)
         # reconstructed_phase = self.std_norm(reconstructed_phase, batch_n)
 
-        # reconstruction_loss = torch.nn.functional.mse_loss(scaled_target[mask_1], _x_1)
+        # reconstruction_loss = torch.nn.functional.smooth_l1_loss(target_concat, _x_1)
         amplitude_loss = torch.nn.functional.smooth_l1_loss(target_amplitude, pred_concat_amp)
         phase_loss = torch.nn.functional.smooth_l1_loss(target_phase, pred_concat_pha)
 

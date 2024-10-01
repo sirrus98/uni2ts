@@ -166,3 +166,4 @@ example/data_cache/
 example/data_pretrain_cache/
 rns_data/
 example/lightning_logs/
+example/log/
