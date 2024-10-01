@@ -13,6 +13,8 @@ from einops import rearrange
 from uni2ts.common.torch_util import mask_fill, packed_attention_mask
 from uni2ts.model.moirai.convert import _convert
 import lightning as L
+from torch.optim import AdamW
+from torch.optim.lr_scheduler import CosineAnnealingLR
 
 
 class EncoderModel(nn.Module):
@@ -84,8 +86,10 @@ class Pretraining(L.LightningModule):
     def __init__(self, encoder):
         super().__init__()
         self.encoder = encoder
-        self.fc1 = nn.Linear(384, 256)
-        self.fc2 = nn.Linear(256, 128)
+        self.fc1_1 = nn.Linear(384, 256)
+        self.fc2_1 = nn.Linear(256, 128)
+        self.fc1_2 = nn.Linear(384, 256)
+        self.fc2_2 = nn.Linear(256, 128)
         self.relu = nn.ReLU()
         self.criterion = nn.MSELoss(reduction='mean')
 
@@ -146,29 +150,33 @@ class Pretraining(L.LightningModule):
     def std_norm(self, x, batch_n):
         # print(range(batch_n.max()+1))
         # print(batch_n)
-        for i in range(batch_n.max()+1):
+        for i in range(batch_n.max() + 1):
             # print(i)
             idx = batch_n == i
-            mean = torch.mean(x[idx] )
+            mean = torch.mean(x[idx])
             std = torch.std(x[idx])
-            x[idx] = (x[idx] - mean) / (std+1e-6)
+            x[idx] = (x[idx] - mean) / (std + 1e-6)
         return x
+
     def training_step(self, batch, batch_idx):
         data_zip, label, batch_n = batch
         mask_1, mask_2 = self.generate_symmetrical_mask(data_zip[2], data_zip[5])
         data_zip[5] = mask_1
         z_1, scaled_target = self.encoder(data_zip)
         z_1 = z_1[mask_1]
-        _x_1 = self.fc2(self.relu(self.fc1(z_1)))
+        _x_1_amp = self.fc2_1(self.relu(self.fc1_1(z_1)))
+        _x_1_pha = self.fc2_2(self.relu(self.fc1_2(z_1)))
         batch_n_1 = batch_n[mask_1]
         data_zip[5] = mask_2
         z_2, scaled_target = self.encoder(data_zip)
         z_2 = z_2[mask_2]
-        _x_2 = self.fc2(self.relu(self.fc1(z_2)))
+        _x_2_amp = self.fc2_1(self.relu(self.fc1_1(z_2)))
+        _x_2_pha = self.fc2_2(self.relu(self.fc1_2(z_2)))
         batch_n_2 = batch_n[mask_2]
         # print(batch_n_1.shape, batch_n_2.shape)
 
-        pred_concat = torch.cat((_x_1, _x_2), dim=0)
+        pred_concat_amp = torch.cat((_x_1_amp, _x_2_amp), dim=0)
+        pred_concat_pha = torch.cat((_x_1_pha, _x_2_pha), dim=0)
         # print(pred_concat.shape)
         target_concat = torch.cat((scaled_target[mask_1], scaled_target[mask_2]), dim=0)
         # print(target_concat.shape)
@@ -181,21 +189,20 @@ class Pretraining(L.LightningModule):
         target_phase = torch.angle(target_fft)
         target_phase = self.std_norm(target_phase, batch_n)
 
-        reconstructed_fft = torch.fft.fft(pred_concat, dim = -1)
-        reconstructed_amplitude = torch.abs(reconstructed_fft)
-        reconstructed_amplitude = self.std_norm(reconstructed_amplitude, batch_n)
-        reconstructed_phase = torch.angle(reconstructed_fft)
-        reconstructed_phase = self.std_norm(reconstructed_phase, batch_n)
+        # reconstructed_fft = torch.fft.fft(pred_concat, dim = -1)
+        # reconstructed_amplitude = torch.abs(reconstructed_fft)
+        # reconstructed_amplitude = self.std_norm(reconstructed_amplitude, batch_n)
+        # reconstructed_phase = torch.angle(reconstructed_fft)
+        # reconstructed_phase = self.std_norm(reconstructed_phase, batch_n)
 
-        reconstruction_loss = torch.nn.functional.mse_loss(scaled_target[mask_1], _x_1)
-        amplitude_loss = torch.nn.functional.mse_loss(target_amplitude, reconstructed_amplitude)
-        phase_loss = torch.nn.functional.mse_loss(target_phase, reconstructed_phase)
+        # reconstruction_loss = torch.nn.functional.mse_loss(scaled_target[mask_1], _x_1)
+        amplitude_loss = torch.nn.functional.smooth_l1_loss(target_amplitude, pred_concat_amp)
+        phase_loss = torch.nn.functional.smooth_l1_loss(target_phase, pred_concat_pha)
 
-
-        loss = amplitude_loss + phase_loss + reconstruction_loss
+        loss = amplitude_loss + phase_loss
         self.log('amp_loss', amplitude_loss, prog_bar=True)
         self.log('phase_loss', phase_loss, prog_bar=True)
-        self.log('recon_loss', reconstruction_loss, prog_bar=True)
+        # self.log('recon_loss', reconstruction_loss, prog_bar=True)
 
         self.log('loss', loss, prog_bar=True)
 
@@ -212,9 +219,17 @@ class Pretraining(L.LightningModule):
         return data_zip, unmasked_z, unmasked_label, logits
 
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.parameters(), lr=1e-6)
+        optimizer = AdamW(self.parameters(), lr=5e-5, betas=(0.9, 0.99))
 
-        return optimizer
+        # Scheduler
+        scheduler = CosineAnnealingLR(optimizer, T_max=100, eta_min=1e-5)
+
+        # Lightning expects a dictionary if you want to return both the optimizer and scheduler
+        return {
+            'optimizer': optimizer,
+            'lr_scheduler': scheduler,
+            'monitor': 'train_loss'  # Optional: metric to monitor for scheduling
+        }
 
 
 class LinearProbing(L.LightningModule):
@@ -257,10 +272,10 @@ class LinearProbing(L.LightningModule):
         return unmasked_z, unmasked_label
 
     def training_step(self, batch, batch_idx):
-        data_zip, label = batch
+        data_zip, label, _ = batch
         self.encoder.eval()
         with torch.no_grad():
-            z = self.encoder(data_zip)
+            z, _ = self.encoder(data_zip)
         unmasked_z, unmasked_label = self.prepare_unmasked_data_channel_label(z, data_zip, label)
         logits = self.fc2(self.relu(self.fc1(unmasked_z)))
         loss = self.criterion(logits, unmasked_label.long())
@@ -270,10 +285,10 @@ class LinearProbing(L.LightningModule):
         return loss
 
     def predict_step(self, batch, batch_idx):
-        data_zip, label = batch
+        data_zip, label, _ = batch
         self.encoder.eval()
         with torch.no_grad():
-            z = self.encoder(data_zip)
+            z, _ = self.encoder(data_zip)
         unmasked_z, unmasked_label = self.prepare_unmasked_data_channel_label(z, data_zip, label)
         logits = self.fc2(self.relu(self.fc1(unmasked_z)))
 
